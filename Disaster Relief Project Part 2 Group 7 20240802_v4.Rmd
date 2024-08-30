@@ -1,0 +1,1144 @@
+---
+title: "Disaster Relief Project Part 2"
+date: "`r Sys.Date()`"
+output:
+  pdf_document: default
+  html_document: default
+authors:
+  - name: "Leonce, Emmanuel D (fyb7sx)"
+---
+```{r hide-code, echo=FALSE, message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo=FALSE)
+```
+
+### Introduction
+
+In the wake of the devastating earthquake that struck Haiti in 2010, countless individuals were displaced, leaving them without shelter, food, or water. The aftermath presented significant challenges for rescue operations, particularly in locating those in need of assistance. With communication lines down and infrastructure severely damaged, the ability to quickly and accurately identify the locations of displaced persons became a critical priority. 
+
+One innovative solution emerged from the efforts of the Rochester Institute of Technology, which involved collecting high-resolution geo-referenced imagery from aircraft flying over the affected areas. It was observed that many displaced individuals used blue tarps to create temporary shelters, making these tarps a crucial indicator of where aid was needed. However, the sheer volume of imagery collected each day made it impractical for human operators to manually search for these tarps and communicate their locations to rescue teams in a timely manner. 
+
+To address this problem, data-mining algorithms offer a promising approach. By leveraging the power of machine learning, it is possible to automate the process of scanning the imagery, identifying blue tarps, and pinpointing the locations of displaced persons. This project aims to harness such algorithms to enhance the efficiency and accuracy of disaster relief efforts. 
+
+
+```{r hide-code, echo=FALSE, message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo=FALSE)
+# Load necessary libraries
+library(MLmetrics)
+library(tidyverse)
+library(caret)
+library(dplyr)
+library(doParallel)
+library(ggplot2)
+library(yardstick)
+library(pROC)
+library(GGally)
+library(tidyr)
+library(gridExtra)
+library(tune)
+library(tidymodels) 
+library(pROC)
+library(ggfortify)  
+```
+
+
+
+
+## Data Exploration and Preprocessing
+## Data Summary
+```{r data-summary, echo=FALSE, message=FALSE, warning=FALSE}
+# Global option for parallel processing
+options(tidymodels.control = list(allowParallel = TRUE))
+
+# Set up parallel processing
+cl <- makeCluster(detectCores() - 1)  # Use one less core to avoid overloading the system
+registerDoParallel(cl)
+
+# Load the training data
+haiti_data <- read.csv('https://gedeck.github.io/DS-6030/project/HaitiPixels.csv')
+
+# head of the data frame
+head(haiti_data)
+
+# structure of the data frame
+str(haiti_data)
+
+# Summary statistics
+summary(haiti_data)
+
+# Melt the dataset for ggplot2
+haiti_data_melt <- haiti_data %>%
+  pivot_longer(cols = c(Red, Green, Blue), names_to = "Color", values_to = "Value")
+
+# Create a box plot
+ggplot(haiti_data_melt, aes(x = Color, y = Value, fill = Class)) +
+  geom_boxplot() +
+  labs(title = "Box Plot of Color Channels by Class", x = "Color Channel", y = "Value") +
+  theme_minimal()
+```
+
+
+The box plot helps us understand the differences in color values (Red, Green, Blue) for different types of objects found in the images. The objects are categorized into five classes: Blue Tarp, Rooftop, Soil, Various Non-Tarp, and Vegetation.
+
+Blue Tarps: The blue tarps stand out because they have high blue values. This makes them easier to detect in the images.
+
+Vegetation: Vegetation is easy to identify due to its high green values.
+
+Soil and Rooftops: Soil and rooftops have distinctive red and green values, making them different from blue tarps.
+
+By understanding these color differences, machine learning algorithms can be trained to automatically detect blue tarps in aerial images. This helps rescue teams quickly find where people need help, making disaster relief efforts more efficient and effective.
+
+
+## Class Distribution
+```{r class-distribution, echo=FALSE, message=FALSE, warning=FALSE}
+# Check the distribution of the 'Class' variable
+table(haiti_data$Class)
+
+# Create a summary data frame for class frequencies
+class_df <- haiti_data %>%
+  count(Class) %>%
+  rename(Freq = n, Var1 = Class)
+
+# Define custom colors to match the previous box plot
+custom_colors <- c("Blue Tarp" = "blue",
+                   "Rooftop" = "green",
+                   "Soil" = "red",
+                   "Various Non-Tarp" = "brown",
+                   "Vegetation" = "purple")
+
+# Plot the bar graph with custom colors
+ggplot(class_df, aes(x = Var1, y = Freq, fill = Var1)) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = custom_colors) +
+  labs(title = "Distribution of Class in Haiti Data",
+       x = "Class",
+       y = "Frequency") +
+  theme_minimal()
+```
+
+The bar graph shows the distribution of different classes of objects (Blue Tarp, Rooftop, Soil, Various Non-Tarp, Vegetation) in the Haiti dataset.
+
+The blue tarps, which are critical for locating displaced persons, are relatively rare in the dataset. This rarity poses a challenge for the machine learning model, which needs to be particularly sensitive and accurate in identifying these tarps amidst more common objects like soil and vegetation.`
+
+The dataset is imbalanced, with a significant overrepresentation of vegetation and soil compared to blue tarps. The model must be trained to handle this imbalance, possibly through techniques like oversampling, under sampling, or synthetic data generation to ensure it doesn't overlook the less common blue tarps.
+
+The abundance of vegetation and soil means the model must be robust and well-trained to differentiate these from blue tarps. Effective feature extraction, such as leveraging the distinct blue color of the tarps, is crucial.
+
+High accuracy in detecting blue tarps is vital to ensure that rescue operations are directed to the right locations. False positives (misidentifying non-tarps as tarps) can lead to wasted resources, while false negatives (failing to detect actual tarps) can mean missing people in need.
+
+
+
+
+## Visualizations
+```{r visualizations, echo=FALSE, message=FALSE, warning=FALSE, fig.height=14, fig.width=12}
+# Histograms for each predictor
+p1 <- ggplot(haiti_data, aes(x = Blue)) + 
+  geom_histogram(binwidth = 10, fill = "blue", alpha = 0.7) +
+  labs(title = "Distribution of Blue Channel", x = "Blue Intensity", y = "Count") +
+  theme_minimal()
+
+p2 <- ggplot(haiti_data, aes(x = Green)) + 
+  geom_histogram(binwidth = 10, fill = "green", alpha = 0.7) +
+  labs(title = "Distribution of Green Channel", x = "Green Intensity", y = "Count") +
+  theme_minimal()
+
+p3 <- ggplot(haiti_data, aes(x = Red)) + 
+  geom_histogram(binwidth = 10, fill = "red", alpha = 0.7) +
+  labs(title = "Distribution of Red Channel", x = "Red Intensity", y = "Count") +
+  theme_minimal()
+
+# Display histograms
+grid.arrange(p1, p2, p3, nrow = 3)
+```
+
+The histograms above show the distribution of color intensity values for the Blue, Green, and Red channels across all the data points in the Haiti dataset.
+
+Blue Channel Histogram:
+•	Low values: Around 50, indicating objects that do not reflect much blue light, like soil and vegetation.
+•	High values: Around 200, likely representing blue tarps, which are the primary focus for identifying shelters.
+•	The distinct high peak around 200 is crucial for identifying blue tarps amidst other objects.
+
+Blue tarps are relatively rare but critical for locating shelters. The machine learning model must be trained to detect these accurately despite their rarity.
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# Scatter plot matrix to visualize correlations
+ggpairs(haiti_data, aes(color = Class))
+
+# Calculate and display the correlation matrix
+correlation_matrix <- cor(haiti_data[, c("Red", "Green", "Blue")])
+
+# Correlation Matrix
+print(correlation_matrix)
+```
+
+The combined plot provides a comprehensive view of the data, including class distribution, box plots, and scatter plots with density distributions. Each component contributes to understanding how different color channels (Red, Green, Blue) vary across different classes (Blue Tarp, Rooftop, Soil, Various Non-Tarp, Vegetation).
+
+Bar Plot of Class Distribution Shows the frequency of each class in the dataset.
+Key Points:
+•	Vegetation: The most common class.
+•	Soil: The second most common class.
+•	Rooftop: Moderately frequent.
+•	Various Non-Tarp: Less frequent.
+•	Blue Tarp: The least common class.
+Box Plots for Color Channels (Red, Green, Blue) by Class Shows the distribution of color intensity values for each class across the three color channels.
+Key Points:
+•	Red Channel:
+o	Soil: High values.
+o	Rooftop: Moderate to high values.
+o	Blue Tarp: Low to moderate values.
+o	Vegetation: Low to moderate values.
+•	Green Channel:
+o	Vegetation: High values.
+o	Rooftop: Moderate to high values.
+o	Blue Tarp: Moderate values.
+o	Soil: Moderate values.
+•	Blue Channel:
+o	Blue Tarp: High values.
+o	Rooftop: Moderate values.
+o	Soil: Low values.
+o	Vegetation: Low values.
+
+Scatter Plots with Density Distributions shows the relationships between the color channels for different classes, with density plots highlighting the distribution of color values.
+Key Points:
+•	Red vs. Green:
+o	Clear separation between classes, especially between Vegetation and Soil.
+•	Red vs. Blue:
+o	Blue Tarp is distinct with high blue values.
+
+•	Green vs. Blue:
+o	Vegetation is distinct with high green values.
+
+Correlation Coefficients shows the correlation between color channels for each class.
+Key Points:
+High Correlations: Indicates strong relationships within color channels for specific classes. Example: High blue correlation for Blue Tarp.
+
+
+Conclusion:
+•	The dataset is dominated by Vegetation and Soil, with Blue Tarps being relatively rare. This imbalance poses a challenge for machine learning models, which need to accurately detect the rare Blue Tarps while managing the more common classes.
+
+•	Each class has unique color characteristics Blue Tarp: High blue values, Vegetation: High green values,  Soil: High red values, Rooftop: Moderate red and green values. These distinct profiles are crucial features for classification.
+
+•	High correlations within color channels for specific classes (e.g., Blue Tarp's high blue correlation) indicate consistent color features that can be leveraged for accurate class differentiation.
+
+•	By leveraging these insights, a well-trained machine learning model can significantly enhance disaster response efforts by accurately identifying Blue Tarps in aerial imagery. This allows rescue teams to quickly locate and assist displaced persons, improving the efficiency and effectiveness of aid delivery.
+
+
+
+
+## Data Transformation
+```{r data-transformation, echo=FALSE, message=FALSE, warning=FALSE}
+# Convert 'Class' to binary outcome variable and ensure valid variable names
+haiti_data$Blue_Tarp_Present <- ifelse(haiti_data$Class == "Blue Tarp", "Yes", "No")
+haiti_data$Blue_Tarp_Present <- factor(haiti_data$Blue_Tarp_Present, levels = c("No", "Yes"))
+
+# Normalize predictors
+predictors <- dplyr::select(haiti_data, Red, Green, Blue)
+
+# Response variable
+response <- haiti_data$Blue_Tarp_Present
+
+# Check for missing values in the training data
+missing_values <- sapply(haiti_data, function(x) sum(is.na(x)))
+print(missing_values)
+
+# Balance the data by oversampling the minority class
+haiti_data_balanced <- haiti_data %>%
+  group_by(Blue_Tarp_Present) %>%
+  mutate(n = n()) %>%
+  ungroup() %>%
+  bind_rows(haiti_data %>% filter(Blue_Tarp_Present == "Yes") %>% sample_n(sum(haiti_data$Blue_Tarp_Present == "No") - sum(haiti_data$Blue_Tarp_Present == "Yes"), replace = TRUE))
+
+# Check the distribution after balancing
+table(haiti_data_balanced$Blue_Tarp_Present)
+
+# Combine predictors and response for model training
+training_data <- dplyr::select(haiti_data_balanced, Red, Green, Blue, Blue_Tarp_Present)
+```
+
+
+
+
+## Model Development
+## Model Training
+```{r model-training, echo=FALSE, message=FALSE, warning=FALSE}
+# Define the training control with 10 folds
+train_control <- trainControl(method = "cv", 
+                              number = 10,  # Set to 10 folds
+                              classProbs = TRUE, 
+                              summaryFunction = multiClassSummary, 
+                              savePredictions = TRUE)
+
+# Combine predictors and response for model training
+training_data <- cbind(predictors, response)
+
+# Train models using cross-validation
+
+# Logistic Regression
+logistic_model <- train(
+  response ~ ., data = training_data,
+  method = "glm", family = binomial, 
+  trControl = train_control, 
+  metric = "Accuracy"
+)
+
+# Linear Discriminant Analysis
+lda_model <- train(
+  response ~ ., data = training_data,
+  method = "lda", 
+  trControl = train_control, 
+  metric = "Accuracy"
+)
+
+# Quadratic Discriminant Analysis
+qda_model <- train(
+  response ~ ., data = training_data,
+  method = "qda", 
+  trControl = train_control, 
+  metric = "Accuracy"
+)
+
+# Print model performances
+print(logistic_model)
+print(lda_model)
+print(qda_model)
+```
+
+
+
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# Generate ROC curves for each model
+roc_logistic <- roc(logistic_model$pred$obs, logistic_model$pred$Yes)  
+roc_lda <- roc(lda_model$pred$obs, lda_model$pred$Yes)  
+roc_qda <- roc(qda_model$pred$obs, qda_model$pred$Yes)
+
+# Convert ROC objects to data frames
+roc_logistic_df <- data.frame(
+  sensitivity = roc_logistic$sensitivities,
+  specificity = roc_logistic$specificities,
+  model = 'Logistic Regression'
+)
+roc_lda_df <- data.frame(
+  sensitivity = roc_lda$sensitivities,
+  specificity = roc_lda$specificities,
+  model = 'LDA'
+)
+roc_qda_df <- data.frame(
+  sensitivity = roc_qda$sensitivities,
+  specificity = roc_qda$specificities,
+  model = 'QDA'
+)
+
+# Combine all ROC data frames
+roc_combined_df <- bind_rows(roc_logistic_df, roc_lda_df, roc_qda_df)
+
+# Plot ROC curves
+roc_plot <- ggplot(roc_combined_df, aes(x = 1 - specificity, y = sensitivity, color = model)) +
+  geom_line() +
+  labs(title = "ROC Curves", x = "1 - Specificity", y = "Sensitivity") +
+  theme_minimal() +
+  scale_color_manual(values = c("Logistic Regression" = "blue", "LDA" = "green", "QDA" = "red"))
+
+print(roc_plot)
+
+# Generate individual ROC plots for each model
+roc_logistic_plot <- ggplot(roc_logistic_df, aes(x = 1 - specificity, y = sensitivity)) +
+  geom_line(color = "blue") +
+  labs(title = "ROC Curve - Logistic Regression", x = "1 - Specificity", y = "Sensitivity") +
+  theme_minimal()
+
+roc_lda_plot <- ggplot(roc_lda_df, aes(x = 1 - specificity, y = sensitivity)) +
+  geom_line(color = "green") +
+  labs(title = "ROC Curve - LDA", x = "1 - Specificity", y = "Sensitivity") +
+  theme_minimal()
+
+roc_qda_plot <- ggplot(roc_qda_df, aes(x = 1 - specificity, y = sensitivity)) +
+  geom_line(color = "red") +
+  labs(title = "ROC Curve - QDA", x = "1 - Specificity", y = "Sensitivity") +
+  theme_minimal()
+
+# Print individual ROC plots
+print(roc_logistic_plot)
+print(roc_lda_plot)
+print(roc_qda_plot)
+```
+
+
+
+
+
+## Models with tuning parameters
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# Set seed for reproducibility
+set.seed(123)
+
+# Define the training control with 10 folds
+train_control <- vfold_cv(training_data, v = 10)
+
+# Define and train models with tuning parameters
+
+# KNN
+knn_spec <- nearest_neighbor(neighbors = tune()) %>%
+  set_engine("kknn") %>%
+  set_mode("classification")
+
+knn_grid <- grid_regular(neighbors(range = c(3, 11)), levels = 5)
+
+knn_workflow <- workflow() %>%
+  add_model(knn_spec) %>%
+  add_formula(response ~ .)
+
+knn_results <- tune_grid(knn_workflow, resamples = train_control, grid = knn_grid, control = control_grid(save_pred = TRUE))
+knn_best <- select_best(knn_results, metric = "accuracy")
+knn_final <- finalize_workflow(knn_workflow, knn_best)
+knn_final_results <- fit_resamples(knn_final, resamples = train_control, control = control_resamples(save_pred = TRUE))
+
+autoplot(knn_results)
+
+# Elastic Net
+elastic_net_spec <- logistic_reg(mixture = tune(), penalty = tune()) %>%
+  set_engine("glmnet")
+
+elastic_net_grid <- grid_regular(penalty(range = c(0.01, 0.1)), mixture(range = c(0.1, 0.7)), levels = 3)
+
+elastic_net_workflow <- workflow() %>%
+  add_model(elastic_net_spec) %>%
+  add_formula(response ~ .)
+
+elastic_net_results <- tune_grid(elastic_net_workflow, resamples = train_control, grid = elastic_net_grid, control = control_grid(save_pred = TRUE))
+elastic_net_best <- select_best(elastic_net_results, metric = "accuracy")
+elastic_net_final <- finalize_workflow(elastic_net_workflow, elastic_net_best)
+elastic_net_final_results <- fit_resamples(elastic_net_final, resamples = train_control, control = control_resamples(save_pred = TRUE))
+
+autoplot(elastic_net_results)
+
+# Random Forest
+rf_spec <- rand_forest(mtry = tune()) %>%
+  set_engine("ranger") %>%
+  set_mode("classification")
+
+rf_grid <- grid_regular(mtry(range = c(2, 6)), levels = 3)
+
+rf_workflow <- workflow() %>%
+  add_model(rf_spec) %>%
+  add_formula(response ~ .)
+
+rf_results <- tune_grid(rf_workflow, resamples = train_control, grid = rf_grid, control = control_grid(save_pred = TRUE))
+rf_best <- select_best(rf_results, metric = "accuracy")
+rf_final <- finalize_workflow(rf_workflow, rf_best)
+rf_final_results <- fit_resamples(rf_final, resamples = train_control, control = control_resamples(save_pred = TRUE))
+
+autoplot(rf_results)
+
+# XGBoost
+xgb_spec <- boost_tree(
+  trees = 100,
+  tree_depth = tune(),
+  learn_rate = tune(),
+  loss_reduction = tune(),
+  sample_size = tune(),
+  stop_iter = tune()
+) %>%
+  set_engine("xgboost") %>%
+  set_mode("classification")
+
+xgb_grid <- grid_regular(
+  tree_depth(range = c(3, 7)),
+  learn_rate(range = c(0.01, 0.3)),
+  loss_reduction(range = c(0, 1)),
+  sample_prop(range = c(0.8, 1)),
+  stop_iter(range = c(10, 20)),
+  levels = 3
+)
+
+xgb_workflow <- workflow() %>%
+  add_model(xgb_spec) %>%
+  add_formula(response ~ .)
+
+xgb_results <- tune_grid(xgb_workflow, resamples = train_control, grid = xgb_grid, control = control_grid(save_pred = TRUE))
+xgb_best <- select_best(xgb_results, metric = "accuracy")
+xgb_final <- finalize_workflow(xgb_workflow, xgb_best)
+xgb_final_results <- fit_resamples(xgb_final, resamples = train_control, control = control_resamples(save_pred = TRUE))
+
+autoplot(xgb_results)
+
+# SVM with RBF Kernel
+svm_rbf_spec <- svm_rbf(cost = tune(), rbf_sigma = tune()) %>%
+  set_engine("kernlab") %>%
+  set_mode("classification")
+
+# Narrower ranges and fewer levels
+svm_rbf_grid <- grid_random(cost(range = c(0.1, 10)), rbf_sigma(range = c(0.1, 1)), size = 10)
+
+svm_rbf_workflow <- workflow() %>%
+  add_model(svm_rbf_spec) %>%
+  add_formula(response ~ .)
+
+# Tune with parallel processing
+svm_rbf_results <- tune_grid(svm_rbf_workflow, resamples = train_control, grid = svm_rbf_grid, control = control_grid(save_pred = TRUE))
+
+svm_rbf_best <- select_best(svm_rbf_results, metric = "accuracy")
+svm_rbf_final <- finalize_workflow(svm_rbf_workflow, svm_rbf_best)
+svm_rbf_final_results <- fit_resamples(svm_rbf_final, resamples = train_control, control = control_resamples(save_pred = TRUE))
+
+autoplot(svm_rbf_results)
+
+# Collect performance metrics
+knn_metrics <- collect_metrics(knn_final_results)
+elastic_net_metrics <- collect_metrics(elastic_net_final_results)
+rf_metrics <- collect_metrics(rf_final_results)
+xgb_metrics <- collect_metrics(xgb_final_results)
+svm_rbf_metrics <- collect_metrics(svm_rbf_final_results)
+
+# Combine all metrics
+metrics <- bind_rows(
+  knn_metrics,
+  elastic_net_metrics,
+  rf_metrics,
+  xgb_metrics,
+  svm_rbf_metrics
+)
+
+# Add model names to the metrics data frame
+model_names <- c("KNN", "Elastic Net", "Random Forest", "XGBoost", "SVM RBF")
+num_models <- length(model_names)
+metrics <- metrics %>%
+  mutate(Model = rep(model_names, each = nrow(metrics) / num_models))
+
+# Separate metrics and their values, ensuring consistent types
+metrics_clean <- metrics %>%
+  select(.metric, mean, Model) %>%
+  pivot_longer(cols = -c(Model, .metric), names_to = "Metric_Type", values_to = "Value")
+
+# Visualize the metrics using ggplot2
+performance_plot <- ggplot(metrics_clean, aes(x = Model, y = Value, fill = Model)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  facet_wrap(~.metric, scales = "free_y") +
+  theme_minimal() +
+  labs(title = "Model Performance Metrics",
+       y = "Metric Value",
+       x = "Model") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+print(performance_plot)
+
+# # Stop parallel processing
+# stopCluster(cl)
+# registerDoSEQ()
+```
+
+
+
+
+
+
+## Model Testing and Evaluation with HOLDOUT Data
+## Hold-Out - EDA
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# Load the holdout data files
+holdout_files <- list(
+  holdout_057_NonTarp = "orthovnir057_ROI_NON_Blue_Tarps.txt",
+  holdout_067_Tarp = "orthovnir067_ROI_Blue_Tarps_data.txt",
+  holdout_067_Tarp2 = "orthovnir067_ROI_Blue_Tarps.txt",
+  holdout_067_NonTarp = "orthovnir067_ROI_NOT_Blue_Tarps.txt",
+  holdout_069_Tarp = "orthovnir069_ROI_Blue_Tarps.txt",
+  holdout_069_NonTarp = "orthovnir069_ROI_NOT_Blue_Tarps.txt",
+  holdout_078_Tarp = "orthovnir078_ROI_Blue_Tarps.txt",
+  holdout_078_NonTarp = "orthovnir078_ROI_NON_Blue_Tarps.txt"
+)
+
+# Corresponding lines to skip for each file
+skip_lines <- c(8, 1, 8, 8, 8, 8, 8, 8)
+
+# Columns to keep
+cols_to_keep <- 8:10
+
+# Initialize an empty list to store the dataframes
+dataframes <- list()
+
+# Load and process the holdout data
+for (i in 1:length(holdout_files)) {
+  df <- read.csv(holdout_files[[i]], header = FALSE, skip = skip_lines[i], sep = ifelse(i == 2, "", " "))
+  
+  # Check if the dataframe has enough columns before subsetting
+  if (ncol(df) >= max(cols_to_keep)) {
+    df <- df[, cols_to_keep]
+    colnames(df) <- c('Red', 'Green', 'Blue')
+  } else {
+    stop(paste("File", holdout_files[[i]], "does not have enough columns."))
+  }
+  
+  # Add the dataframe to the list
+  dataframes[[i]] <- df
+}
+
+# Assign the renamed dataframes back to their original names
+names(dataframes) <- names(holdout_files)
+list2env(dataframes, .GlobalEnv)
+
+# Mutate 'Blue_Tarp_Present' variable
+mutate_blue_tarp <- function(df, status) {
+  df %>% mutate(Blue_Tarp_Present = as.factor(status))
+}
+
+holdout_057_NonTarp <- mutate_blue_tarp(holdout_057_NonTarp, "No")
+holdout_067_Tarp <- mutate_blue_tarp(holdout_067_Tarp, "Yes")
+holdout_067_Tarp2 <- mutate_blue_tarp(holdout_067_Tarp2, "Yes")
+holdout_067_NonTarp <- mutate_blue_tarp(holdout_067_NonTarp, "No")
+holdout_069_Tarp <- mutate_blue_tarp(holdout_069_Tarp, "Yes")
+holdout_069_NonTarp <- mutate_blue_tarp(holdout_069_NonTarp, "No")
+holdout_078_Tarp <- mutate_blue_tarp(holdout_078_Tarp, "Yes")
+holdout_078_NonTarp <- mutate_blue_tarp(holdout_078_NonTarp, "No")
+
+# Combine holdout subsets into a greater holdout set
+holdout <- bind_rows(
+  holdout_057_NonTarp,
+  holdout_067_Tarp,
+  holdout_067_Tarp2,
+  holdout_067_NonTarp,
+  holdout_069_Tarp,
+  holdout_069_NonTarp,
+  holdout_078_Tarp,
+  holdout_078_NonTarp
+)
+
+# Define scatter plot for Red, Green, and Blue columns against Blue_Tarp_Present
+ggplot(holdout, aes(x = Red, y = Green, color = Blue_Tarp_Present)) +
+  geom_point(aes(size = Blue)) +
+  labs(title = "Scatter Plot of Holdout Data", x = "Red", y = "Green", size = "Blue") +
+  scale_x_continuous(limits = c(0, 600)) +     
+  scale_y_continuous(limits = c(0, 600)) +     
+  scale_color_manual(values = c("No" = "red", "Yes" = "blue")) +  
+  facet_wrap(~Blue_Tarp_Present) +  
+  theme_minimal()  
+
+# Calculate and display the correlation matrix
+correlation_matrix_hold <- cor(holdout[, c("Red", "Green", "Blue")])
+
+# Correlation Matrix
+print(correlation_matrix_hold)
+
+summary(holdout)
+summary(haiti_data)
+```
+
+
+
+
+## Model Evaluation
+## Define Recipe and Cross-Validation
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# Remove the Class column and ensure target column is a factor
+haiti_data <- haiti_data %>% select(-Class)
+haiti_data$Blue_Tarp_Present <- as.factor(haiti_data$Blue_Tarp_Present)
+holdout_data$Blue_Tarp_Present <- as.factor(holdout_data$Blue_Tarp_Present)
+
+# Remove rows with missing values in both datasets
+haiti_data <- na.omit(haiti_data)
+holdout_data <- na.omit(holdout_data)
+
+# Ensure the data frames have the same columns
+common_columns <- intersect(colnames(haiti_data), colnames(holdout_data))
+haiti_data <- haiti_data[, common_columns]
+holdout_data <- holdout_data[, common_columns]
+
+# Print column names to verify consistency
+cat("Training data columns:\n")
+print(colnames(haiti_data))
+cat("Holdout data columns:\n")
+print(colnames(holdout_data))
+
+# Create a recipe, excluding factor variables from normalization
+recipe <- recipe(Blue_Tarp_Present ~ ., data = haiti_data) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_nzv(all_predictors()) %>%  # Remove near-zero variance predictors
+  step_corr(all_numeric_predictors(), threshold = 0.9) %>%
+  step_normalize(all_numeric_predictors()) %>%
+  step_impute_mean(all_numeric_predictors())  # Impute missing values with mean
+
+# Print the recipe to verify steps
+print(recipe)
+
+# Define cross-validation
+cv_folds <- vfold_cv(haiti_data, v = 10)
+```
+
+
+
+## Training and Evaluation - Holdout by Model
+## Logistic Regression 
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# Define function to train and evaluate model
+train_and_evaluate <- function(model_spec, haiti_data, holdout_data, metric = "accuracy") {
+  # Define workflow
+  workflow <- workflow() %>%
+    add_model(model_spec) %>%
+    add_formula(Blue_Tarp_Present ~ .)
+  
+  # Perform cross-validation
+  cv_results <- tune_grid(
+    workflow,
+    resamples = vfold_cv(haiti_data, v = 10),
+    grid = 5,  # Default grid size, adjust as necessary
+    control = control_grid(save_pred = TRUE)
+  )
+  
+  # Select best model based on specified metric
+  best_model <- select_best(cv_results, metric = metric)
+  final_workflow <- finalize_workflow(workflow, best_model)
+  
+  # Fit final model on training data
+  final_fit <- fit(final_workflow, data = haiti_data)
+  
+  # Predict on holdout data
+  holdout_preds <- predict(final_fit, new_data = holdout_data, type = "prob")
+  holdout_class_preds <- predict(final_fit, new_data = holdout_data)
+  
+  # Evaluate model performance
+  confusion <- confusionMatrix(holdout_class_preds$.pred_class, holdout_data$Blue_Tarp_Present)
+  roc_curve_data <- roc(holdout_data$Blue_Tarp_Present, holdout_preds$.pred_Yes)
+  
+  list(
+    final_fit = final_fit,
+    confusion = confusion,
+    roc_curve_data = roc_curve_data
+  )
+}
+
+# Logistic Regression Model Specification
+logistic_spec <- logistic_reg() %>%
+  set_engine("glm") %>%
+  set_mode("classification")
+
+# Train and evaluate Logistic Regression model
+logistic_results <- train_and_evaluate(logistic_spec, haiti_data, holdout_data)
+
+# Print Confusion Matrix and ROC Curve
+print(logistic_results$confusion)
+
+# Plot ROC Curve
+roc_data_frame <- data.frame(
+  FPR = 1 - logistic_results$roc_curve_data$specificities,
+  TPR = logistic_results$roc_curve_data$sensitivities
+)
+
+ggplot(roc_data_frame, aes(x = FPR, y = TPR)) +
+  geom_line() +
+  geom_abline(linetype = "dashed") +
+  labs(x = "False Positive Rate", y = "True Positive Rate", title = "ROC Curve - Logistic Regression") +
+  theme_minimal()
+```
+
+
+
+
+## Linear Discriminant Analysis
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# Define LDA Model Specification
+lda_spec <- discrim_linear() %>%
+  set_engine("MASS") %>%
+  set_mode("classification")
+
+# Train and evaluate LDA model
+lda_results <- train_and_evaluate(lda_spec, haiti_data, holdout_data)
+
+# Print Confusion Matrix and ROC Curve
+print(lda_results$confusion)
+
+# Plot ROC Curve
+roc_data_frame <- data.frame(
+  FPR = 1 - lda_results$roc_curve_data$specificities,
+  TPR = lda_results$roc_curve_data$sensitivities
+)
+
+ggplot(roc_data_frame, aes(x = FPR, y = TPR)) +
+  geom_line() +
+  geom_abline(linetype = "dashed") +
+  labs(x = "False Positive Rate", y = "True Positive Rate", title = "ROC Curve - LDA") +
+  theme_minimal()
+```
+
+
+
+
+## Quadratic Discriminant Analysis
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# Define QDA Model Specification
+qda_spec <- discrim_quad() %>%
+  set_engine("MASS") %>%
+  set_mode("classification")
+
+# Train and evaluate QDA model
+qda_results <- train_and_evaluate(qda_spec, haiti_data, holdout_data)
+
+# Print Confusion Matrix and ROC Curve
+print(qda_results$confusion)
+
+# Plot ROC Curve
+roc_data_frame <- data.frame(
+  FPR = 1 - qda_results$roc_curve_data$specificities,
+  TPR = qda_results$roc_curve_data$sensitivities
+)
+
+ggplot(roc_data_frame, aes(x = FPR, y = TPR)) +
+  geom_line() +
+  geom_abline(linetype = "dashed", color = "red") +
+  labs(x = "False Positive Rate", y = "True Positive Rate", title = "ROC Curve - QDA") +
+  theme_minimal()
+```
+
+
+
+
+## K-Nearest Neighbors
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# Define KNN Model Specification
+knn_spec <- nearest_neighbor(neighbors = tune()) %>%
+  set_engine("kknn") %>%
+  set_mode("classification")
+
+# Define KNN Parameter Grid
+knn_grid <- grid_regular(neighbors(range = c(3, 11)), levels = 5)
+
+# Train and evaluate KNN model
+knn_results <- train_and_evaluate(knn_spec, haiti_data, holdout_data, knn_grid)
+
+# Print Confusion Matrix and ROC Curve
+print(knn_results$confusion)
+
+# Plot ROC Curve
+roc_data_frame <- data.frame(
+  FPR = 1 - knn_results$roc_curve_data$specificities,
+  TPR = knn_results$roc_curve_data$sensitivities
+)
+
+ggplot(roc_data_frame, aes(x = FPR, y = TPR)) +
+  geom_line() +
+  geom_abline(linetype = "dashed", color = "red") +
+  labs(x = "False Positive Rate", y = "True Positive Rate", title = "ROC Curve - KNN") +
+  theme_minimal()
+```
+
+
+
+
+## Penalized Logistic Regression (Elastic Net)
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# Define Elastic Net Model Specification
+elastic_net_spec <- logistic_reg(mixture = tune(), penalty = tune()) %>%
+  set_engine("glmnet") %>%
+  set_mode("classification")
+
+# Define Elastic Net Parameter Grid
+elastic_net_grid <- grid_regular(penalty(range = c(0.01, 0.1)), mixture(range = c(0.1, 0.7)), levels = 3)
+
+# Train and evaluate Elastic Net model
+elastic_net_results <- train_and_evaluate(elastic_net_spec, haiti_data, holdout_data, elastic_net_grid)
+
+# Print Confusion Matrix and ROC Curve
+print(elastic_net_results$confusion)
+
+# Plot ROC Curve
+roc_data_frame <- data.frame(
+  FPR = 1 - elastic_net_results$roc_curve_data$specificities,
+  TPR = elastic_net_results$roc_curve_data$sensitivities
+)
+
+ggplot(roc_data_frame, aes(x = FPR, y = TPR)) +
+  geom_line() +
+  geom_abline(linetype = "dashed", color = "red") +
+  labs(x = "False Positive Rate", y = "True Positive Rate", title = "ROC Curve - Elastic Net") +
+  theme_minimal()
+```
+
+
+
+
+## Random Forest
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# Define Random Forest Model Specification
+rf_spec <- rand_forest(mtry = tune()) %>%
+  set_engine("ranger") %>%
+  set_mode("classification")
+
+# Define Random Forest Parameter Grid
+rf_grid <- grid_regular(mtry(range = c(2, 6)), levels = 3)
+
+# Train and evaluate Random Forest model
+rf_results <- train_and_evaluate(rf_spec, haiti_data, holdout_data, rf_grid)
+
+# Print Confusion Matrix and ROC Curve
+print(rf_results$confusion)
+
+# Plot ROC Curve
+roc_data_frame <- data.frame(
+  FPR = 1 - rf_results$roc_curve_data$specificities,
+  TPR = rf_results$roc_curve_data$sensitivities
+)
+
+ggplot(roc_data_frame, aes(x = FPR, y = TPR)) +
+  geom_line() +
+  geom_abline(linetype = "dashed", color = "red") +
+  labs(x = "False Positive Rate", y = "True Positive Rate", title = "ROC Curve - Random Forest") +
+  theme_minimal()
+```
+
+
+
+
+## XGBoost
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# Define XGBoost Model Specification
+xgb_spec <- boost_tree(
+  trees = 100,
+  tree_depth = tune(),
+  learn_rate = tune(),
+  loss_reduction = tune(),
+  sample_size = tune(),
+  stop_iter = tune()
+) %>%
+  set_engine("xgboost") %>%
+  set_mode("classification")
+
+# Define XGBoost Parameter Grid
+xgb_grid <- grid_regular(
+  tree_depth(range = c(3, 7)),
+  learn_rate(range = c(0.01, 0.3)),
+  loss_reduction(range = c(0, 1)),
+  sample_prop(range = c(0.8, 1)),
+  stop_iter(range = c(10, 20)),
+  levels = 3
+)
+
+# Train and evaluate XGBoost model
+xgb_results <- train_and_evaluate(xgb_spec, haiti_data, holdout_data, xgb_grid)
+
+# Print Confusion Matrix and ROC Curve
+print(xgb_results$confusion)
+
+# Plot ROC Curve
+roc_data_frame <- data.frame(
+  FPR = 1 - xgb_results$roc_curve_data$specificities,
+  TPR = xgb_results$roc_curve_data$sensitivities
+)
+
+ggplot(roc_data_frame, aes(x = FPR, y = TPR)) +
+  geom_line() +
+  geom_abline(linetype = "dashed", color = "red") +
+  labs(x = "False Positive Rate", y = "True Positive Rate", title = "ROC Curve - XGBoost") +
+  theme_minimal()
+```
+
+
+
+
+## SVM with RBF Kernel
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# Define SVM with RBF Kernel Model Specification
+svm_rbf_spec <- svm_rbf(cost = tune(), rbf_sigma = tune()) %>%
+  set_engine("kernlab") %>%
+  set_mode("classification")
+
+# Define SVM with RBF Kernel Parameter Grid
+svm_rbf_grid <- grid_random(cost(range = c(0.1, 5)), rbf_sigma(range = c(0.1, 0.5)), size = 5)
+
+# Train and evaluate SVM with RBF Kernel model
+svm_rbf_results <- train_and_evaluate(svm_rbf_spec, haiti_data, holdout_data, svm_rbf_grid)
+
+# Print Confusion Matrix and ROC Curve
+print(svm_rbf_results$confusion)
+
+# Plot ROC Curve
+roc_data_frame <- data.frame(
+  FPR = 1 - svm_rbf_results$roc_curve_data$specificities,
+  TPR = svm_rbf_results$roc_curve_data$sensitivities
+)
+
+ggplot(roc_data_frame, aes(x = FPR, y = TPR)) +
+  geom_line() +
+  geom_abline(linetype = "dashed", color = "red") +
+  labs(x = "False Positive Rate", y = "True Positive Rate", title = "ROC Curve - SVM RBF Kernel") +
+  theme_minimal()
+```
+
+
+
+
+## SVM with Polynomial Kernel
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# Define SVM with Polynomial Kernel Model Specification
+svm_poly_spec <- svm_poly(cost = tune(), degree = tune()) %>%
+  set_engine("kernlab") %>%
+  set_mode("classification")
+
+# Define SVM with Polynomial Kernel Parameter Grid
+svm_poly_grid <- grid_regular(cost(range = c(0.1, 1)), degree(range = c(2, 3)), levels = 2)
+
+# Train and evaluate SVM with Polynomial Kernel model
+svm_poly_results <- train_and_evaluate(svm_poly_spec, haiti_data, holdout_data, svm_poly_grid)
+
+# Print Confusion Matrix and ROC Curve
+print(svm_poly_results$confusion)
+
+# Plot ROC Curve
+roc_data_frame <- data.frame(
+  FPR = 1 - svm_poly_results$roc_curve_data$specificities,
+  TPR = svm_poly_results$roc_curve_data$sensitivities
+)
+
+ggplot(roc_data_frame, aes(x = FPR, y = TPR)) +
+  geom_line() +
+  geom_abline(linetype = "dashed", color = "red") +
+  labs(x = "False Positive Rate", y = "True Positive Rate", title = "ROC Curve - SVM Polynomial Kernel") +
+  theme_minimal()
+```
+
+
+
+
+## SVM with Linear Kernel
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# Define SVM with Linear Kernel Model Specification
+svm_linear_spec <- svm_linear(cost = tune()) %>%
+  set_engine("kernlab") %>%
+  set_mode("classification")
+
+# Define SVM with Linear Kernel Parameter Grid
+svm_linear_grid <- grid_regular(cost(range = c(0.01, 5)), levels = 5)
+
+# Train and evaluate SVM with Linear Kernel model
+svm_linear_results <- train_and_evaluate(svm_linear_spec, haiti_data, holdout_data, svm_linear_grid)
+
+# Print Confusion Matrix and ROC Curve
+print(svm_linear_results$confusion)
+
+# Plot ROC Curve
+roc_data_frame <- data.frame(
+  FPR = 1 - svm_linear_results$roc_curve_data$specificities,
+  TPR = svm_linear_results$roc_curve_data$sensitivities
+)
+
+ggplot(roc_data_frame, aes(x = FPR, y = TPR)) +
+  geom_line() +
+  geom_abline(linetype = "dashed", color = "red") +
+  labs(x = "False Positive Rate", y = "True Positive Rate", title = "ROC Curve - SVM Linear Kernel") +
+  theme_minimal()
+```
+
+
+
+
+## Combine and Visualize Performance Metrics
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# Collect performance metrics for all models
+collect_metrics_fn <- function(results, model_name) {
+  results$metrics %>%
+    mutate(Model = model_name)
+}
+
+# Combine all metrics into one dataframe
+metrics <- bind_rows(
+  collect_metrics_fn(logistic_results, "Logistic Regression"),
+  collect_metrics_fn(lda_results, "LDA"),
+  collect_metrics_fn(qda_results, "QDA"),
+  collect_metrics_fn(knn_results, "KNN"),
+  collect_metrics_fn(elastic_net_results, "Elastic Net"),
+  collect_metrics_fn(rf_results, "Random Forest"),
+  collect_metrics_fn(xgb_results, "XGBoost"),
+  collect_metrics_fn(svm_rbf_results, "SVM RBF"),
+  collect_metrics_fn(svm_poly_results, "SVM Polynomial"),
+  collect_metrics_fn(svm_linear_results, "SVM Linear")
+)
+
+# Ensure necessary columns exist
+metrics <- metrics %>%
+  select(.metric, mean, Model)
+
+# Separate metrics and their values
+metrics_clean <- metrics %>%
+  pivot_longer(cols = -c(Model, .metric), names_to = "Metric_Type", values_to = "Value")
+
+# Visualize the metrics using ggplot2
+performance_plot <- ggplot(metrics_clean, aes(x = Model, y = Value, fill = Model)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  facet_wrap(~.metric, scales = "free_y") +
+  theme_minimal() +
+  labs(title = "Model Performance Metrics",
+       y = "Metric Value",
+       x = "Model") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+print(performance_plot)
+```
+
+
+
+
+## Conclusion
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# Summary of results
+summary_fn <- function(results, model_name) {
+  cat(paste0(model_name, " model performance metrics:\n"))
+  print(results$metrics)
+  cat("\n")
+}
+
+# Print summary for each model
+summary_fn(logistic_results, "Logistic Regression")
+summary_fn(lda_results, "LDA")
+summary_fn(qda_results, "QDA")
+summary_fn(knn_results, "KNN")
+summary_fn(elastic_net_results, "Elastic Net")
+summary_fn(rf_results, "Random Forest")
+summary_fn(xgb_results, "XGBoost")
+summary_fn(svm_rbf_results, "SVM RBF")
+summary_fn(svm_poly_results, "SVM Polynomial")
+summary_fn(svm_linear_results, "SVM Linear")
+```
+
+
+
+
+## Results Summary and Conclusions
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# Collect performance metrics for holdout data
+collect_holdout_metrics <- function(results, model_name) {
+  results$confusion %>%
+    tidy() %>%
+    mutate(Model = model_name)
+}
+
+# Combine all holdout metrics into one dataframe
+holdout_metrics <- bind_rows(
+  collect_holdout_metrics(logistic_results, "Logistic Regression"),
+  collect_holdout_metrics(lda_results, "LDA"),
+  collect_holdout_metrics(qda_results, "QDA"),
+  collect_holdout_metrics(knn_results, "KNN"),
+  collect_holdout_metrics(elastic_net_results, "Elastic Net"),
+  collect_holdout_metrics(rf_results, "Random Forest"),
+  collect_holdout_metrics(xgb_results, "XGBoost"),
+  collect_holdout_metrics(svm_rbf_results, "SVM RBF"),
+  collect_holdout_metrics(svm_poly_results, "SVM Polynomial"),
+  collect_holdout_metrics(svm_linear_results, "SVM Linear")
+)
+
+# Display holdout metrics
+print("Holdout Metrics:")
+print(holdout_metrics)
+```
+
+
+
+
+## Stop Parallel Processing
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# Stop parallel processing
+stopCluster(cl)
+registerDoSEQ()
+```
+
+
+## Appendix
+All the R code used for this analysis is included in the report to ensure reproducibility and transparency.
+## Appendix {-}
+```{r ref.label=knitr::all_labels(), echo=TRUE, eval=FALSE}
+```
